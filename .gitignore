@@ -1,1 +1,5 @@
 *.gif
+.DS_Store
+*code-workspace
+*.*~
+*#

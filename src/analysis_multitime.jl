@@ -19,6 +19,7 @@ V = ds_3d["V"][:,:,:,:] :: Array{Float32,4};
 close(ds)
 close(ds_3d) 
 windspeed = sqrt.(U.*U .+ V.*V);
+
 pres_anomaly = pres[:,:,1,:] .- mean(pres[:,:,1,:],dims=(1,2));
 
 ## Test center detection

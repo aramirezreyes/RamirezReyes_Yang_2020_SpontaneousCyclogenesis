@@ -4,5 +4,10 @@
 *.*~
 *#
 *.out
+*.mp4
+*.svg
+*.pdf
+*.eps
+*.jpg
 settings.json
 src/.vscode/settings.json

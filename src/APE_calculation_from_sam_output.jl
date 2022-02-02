@@ -1,17 +1,14 @@
 """
-    getapeanalysis(file2d,file3d,output_name,outputInterval,FloatType::Type=Float64)
-
-
-
+    getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeindex,partnumber,outputInterval,position,FloatType::Type=Float64)
 """
-function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeindex,partnumber,outputInterval,FloatType::Type=Float64)
+function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeindex,partnumber,outputInterval,position,FloatType::Type=Float64;tropopause_height = 15000)
 
     @info "Starting APE analysis routine"
     day           = 86400
     sst           = 300
     dt            = outputInterval
     
-    dayLength     = 60*60*24/outputInterval; #How many data points make one day
+    dayLength     = 60*60*24÷outputInterval; #How many data points make one day
     #final_time    = floor(Int,final_time_days*dayLength) 
     #initial_time  = floor(Int,initial_time_days*dayLength)+1
     
@@ -19,13 +16,26 @@ function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeind
     Ts            = sst                      #Sea surface temperature
     qs            = 25.7*1e-3 
     Tvs           = Ts*(1+epsilon*qs)
-    c1            = (R/heat_capacity)
+    c1            = (Dryair.R/Dryair.cp)
     
 
-    iterator_time_2d    = initial_timeindex*2-1:2:final_timeindex*2
-    iterator_time_3d    = initial_timeindex:1:final_timeindex
-    
-    
+    #iterator_time_2d    = initial_timeindex*2-1:2:final_timeindex*2
+    #iterator_time_3d    = initial_timeindex:1:final_timeindex
+
+    smooth_x      = smooth_y = 15 #it was 11
+    smooth_time   = floor(Int,dayLength*5)+1 
+
+    if position == 1
+        iterator_time_2d    = initial_timeindex*2-1:2:(final_timeindex+div(smooth_time-1,2))*2  
+        iterator_time_3d    = initial_timeindex:1:final_timeindex+div(smooth_time-1,2)
+    elseif position == 2
+        iterator_time_2d    = (initial_timeindex-div(smooth_time-1,2))*2-1:2:(final_timeindex+div(smooth_time-1,2))*2  
+        iterator_time_3d    = initial_timeindex-div(smooth_time-1,2):1:final_timeindex+div(smooth_time-1,2)
+    elseif position == 3
+        iterator_time_2d    = (initial_timeindex-div(smooth_time-1,2))*2-1:2:final_timeindex*2  
+        iterator_time_3d    = initial_timeindex-div(smooth_time-1,2):1:final_timeindex
+    elseif position == 4
+    end
     @info " Reading files: " file2d file3d
     
     ds3d                = Dataset(file3d)
@@ -56,12 +66,47 @@ function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeind
 
     close(ds3d)   
     close(ds2d)   
-    @info "Finished reading files"
-    ########## Filtering and chopping ##########
     
-    @. SHF    = g/(1*heat_capacity*Ts)*(SHF)                            
-    @. LHF    = g/(1*heat_capacity*Ts)*(epsilon*heat_capacity*Ts/L*LHF) 
-    @. SHF    .+=  LHF     # Now it is transformed
+
+
+    #if 3 nodes:
+    # node 1: workers 1, 2, 5,8
+    # node 2: workers 3, 6, 9
+    # node 3: workers 4, 7, 10
+    @info "Smoothing batch 1"
+    fU   = @spawnat 3 cutborders!(filter_array(U,smooth_x,smooth_time,1),smooth_time,position)
+    fV   = @spawnat 4 cutborders!(filter_array(V,smooth_x,smooth_time,1),smooth_time,position)
+    fW   = @spawnat 6 cutborders!(filter_array(W,smooth_x,smooth_time,1),smooth_time,position)
+    fTv  = @spawnat 7 cutborders!(filter_array(Tv,smooth_x,smooth_time,1),smooth_time,position)
+    U = fetch(fU)
+    V = fetch(fV)
+    W = fetch(fW)
+    Tv = fetch(fTv)
+    
+    fetch(@spawnat 3 GC.gc())
+    fetch(@spawnat 4 GC.gc())
+    fetch(@spawnat 6 GC.gc())
+    fetch(@spawnat 7 GC.gc())
+    @info "smoothing batch 2"
+    fT   = @spawnat 3 cutborders!(filter_array(T,smooth_x,smooth_time,1),smooth_time,position)
+    fPP  = @spawnat 4 cutborders!(filter_array(PP,smooth_x,smooth_time,1),smooth_time,position)
+    fRAD = @spawnat 6 cutborders!(filter_array(RAD,smooth_x,smooth_time,1),smooth_time,position)
+    SHF = cutborders!(filter_array(SHF,smooth_x,smooth_time,1),smooth_time,position)
+    LHF = cutborders!(filter_array(LHF,smooth_x,smooth_time,1),smooth_time,position)
+    t = cutborders!(t,smooth_time,position)
+    
+    T = fetch(fT)
+    PP = fetch(fPP)
+    RAD = fetch(fRAD)
+
+    @everywhere GC.gc()
+    @everywhere GC.gc()
+
+    ###### Processing
+    
+    @. SHF    = g/(1*Dryair.cp*Ts)*(SHF)                            
+    @. LHF    = g/(1*Dryair.cp*Ts)*(epsilon*Dryair.cp*Ts/Liquidwater.Lv*LHF) 
+    @. SHF    +=  LHF     # Now it is transformed
 
     
     ThetaV       = similar(T)
@@ -78,7 +123,7 @@ function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeind
     @.  Tv       = (1 + 1e-3*epsilon*Tv)*T              # Virtual temperature
     @.  P0       = P0*1e2
     PP          .= PP .+ reshape(P0,(1,1,kz,1))
-    ThetaV      .= Tv.*(PP./reshape(P0,(1,1,kz,1))).^c1 # Virtual potential temp
+    ThetaV      .= Tv.*(P0[1]./PP).^c1 # Virtual potential temp
     mean!(xBar_Pt,PP)                                     
     mean!(xBar_Tv,Tv)              
     mean!(xBar_ThetaV,ThetaV)   
@@ -91,7 +136,7 @@ function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeind
     
     N2           = compute_N2(xBar_Tv,z)
 
-
+    LHF        = []
     T          = []
     ThetaV     = []
     Tv         = []
@@ -102,14 +147,16 @@ function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeind
     # Buoyancy budget
     dz          = 50
     @info size(B), size(RAD), size(SHF), size(U),size(V) ,size(W), size(N2), size(dx),size(dy), size(dz), size(dt), size(x),size(y), size(z), size(t)
-    Diabatic_other = buoyancybudget(B, RAD, SHF, U,V ,W, N2, dx,dy, dz, dt, x,y, z, t)
+    Diabatic_other = fetch(@spawnat 3  get_diabatic_as_residual_buoyancy(B, RAD, SHF, U,V ,W, N2, dx,dy, dz, dt))
+    @everywhere GC.gc()
+    @everywhere GC.gc()
     @info "Computing ape budget for the whole troposphere"
 
     # APE budget
-    z_up        = 15000
+    z_up        = tropopause_height
     z_BL        = 2000
 
-        (int_mass,
+     (int_mass,
      int_KE,
      int_APE,
      int_APE_rate,
@@ -119,22 +166,26 @@ function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeind
      int_APE_RAD,
      int_APE_DIA,
      xBar_APE_Fs,
-     residual) = getapebudget(B, U,V, W, N2, RAD, SHF, Diabatic_other, rho0, x,y, z, t, dx,dy, dz, dt, z_up)
-
+     residual) = fetch( @spawnat 3 getapebudget(B, U,V, W, N2, RAD, SHF, Diabatic_other, rho0, x,y, z, t, dx,dy, dz, dt, z_up))
+    @everywhere GC.gc()
+    @everywhere GC.gc()
 
     Diabatic_other .= Diabatic_other .- mean(Diabatic_other,dims=(1,2)) #They are now perturbations
     RAD            .= RAD .- mean(RAD,dims=(1,2))
-    B              .= B .- mean(B,dims=(1,2))
+
 
 
 
     dia_ape = Diabatic_other.*B
-    rad_ape = RAD.*B   
+    rad_ape = RAD .*(B .- mean(B,dims=(1,2))) 
 
     @info "WritingData"
 
 
     jldopen(string(outputfile,partnumber,".jld"), "w") do file
+        write(file,"rho0",rho0)
+        write(file,"B",B)
+        write(file,"N2",N2)
         write(file,"int_APE",int_APE)
         write(file,"int_KE",int_KE)
         write(file,"int_RAD",int_APE_RAD)
@@ -150,7 +201,8 @@ function getapeanalysis(file2d,file3d,outputfile,initial_timeindex,final_timeind
         write(file,"radiative_ape_production",dia_ape)
         write(file,"convective_ape_production",rad_ape)
     end
-    
+    GC.gc()
+    @everywhere GC.gc()
     return nothing
 
 end
@@ -159,7 +211,7 @@ function computebudgets(exp_name)
 
     #file2d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_2d.nc"
     #file3d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_3d.nc"
-    outputfile = string("/global/cscratch1/sd/aramreye/for_postprocessing/ApeBudgetOutputs/",exp_name)
+    outputfile = string("/global/cscratch1/sd/aramreye/for_postprocessing/ApeBudgetOutputs2/",exp_name)
     input_folder = "/global/cscratch1/sd/aramreye/for_postprocessing/largencfiles/"
     file2d = string(input_folder,exp_name,"_2d.nc")
     file3d = string(input_folder,exp_name,"_3d.nc")
@@ -170,13 +222,162 @@ function computebudgets(exp_name)
     number_of_parts = total_days*indices_in_day÷indices_in_part
 
     for part_number in 1:number_of_parts
+        if part_number == 1
+            position = 1
+        elseif part_number == number_of_parts
+            position = 3
+        else
+            position = 2
+        end
         initial_timestep = indices_in_part*(part_number-1) + 1
         final_timestep = indices_in_part*(part_number)
         @info "Starting part $part_number with indices from" initial_timestep final_timestep
-        sleep(1)
         flush(stdout)
         flush(stderr)
-        getapeanalysis(file2d,file3d,outputfile,initial_timestep,final_timestep,part_number,output_timestep,Float32)
+        getapeanalysis(file2d,file3d,outputfile,initial_timestep,final_timestep,part_number,output_timestep,position,Float32)
+
+    end
+
+end
+
+function computebudgets_vartropo(exp_name)
+
+    #file2d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_2d.nc"
+    #file3d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_3d.nc"
+    outputfile = string("/global/cscratch1/sd/aramreye/for_postprocessing/ApeBudgetOutputs_vartropo/",exp_name)
+    input_folder = "/global/cscratch1/sd/aramreye/for_postprocessing/largencfiles/"
+    file2d = string(input_folder,exp_name,"_2d.nc")
+    file3d = string(input_folder,exp_name,"_3d.nc")
+    total_days = 100
+    output_timestep = 7200 #seconds
+    indices_in_part = 50
+    indices_in_day = 86400 ÷ output_timestep
+    number_of_parts = total_days*indices_in_day÷indices_in_part
+    tropopause_height = if exp_name == "f5e-4_2km_1000km_control"
+        15698
+    elseif exp_name == "f5e-4_2km_1000km_homoRad"
+        16066
+    elseif exp_name == "f5e-4_2km_1000km_homoSfc"
+        14997
+    elseif exp_name == "f5e-4_2km_1000km_homoRad_homoSfc"
+        14446
+    end
+    @show tropopause_height
+    for part_number in 1:number_of_parts
+        if part_number == 1
+            position = 1
+        elseif part_number == number_of_parts
+            position = 3
+        else
+            position = 2
+        end
+        initial_timestep = indices_in_part*(part_number-1) + 1
+        final_timestep = indices_in_part*(part_number)
+        @info "Starting part $part_number with indices from" initial_timestep final_timestep
+        flush(stdout)
+        flush(stderr)
+        getapeanalysis(file2d,file3d,outputfile,initial_timestep,final_timestep,part_number,output_timestep,position,Float32;tropopause_height = tropopause_height)
+
+    end
+
+end
+
+
+function computebudgets_15days(exp_name;offset_in_days = 0)
+
+    #file2d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_2d.nc"
+    #file3d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_3d.nc"
+    outputfile = string("/global/cscratch1/sd/aramreye/for_postprocessing/ApeBudgetOutputs_last15days/",exp_name)
+    input_folder = "/global/cscratch1/sd/aramreye/for_postprocessing/largencfiles/"
+    file2d = string(input_folder,exp_name,"_2d.nc")
+    file3d = string(input_folder,exp_name,"_3d.nc")
+    total_days = 15
+    output_timestep = 7200 #seconds
+    indices_in_part = 60
+    indices_in_day = 86400 ÷ output_timestep
+    number_of_parts = total_days*indices_in_day÷indices_in_part
+
+    for part_number in 1:number_of_parts
+        if part_number == 1
+            position = 1
+        elseif part_number == number_of_parts
+            position = 3
+        else
+            position = 2
+        end
+        initial_timestep = offset_in_days*indices_in_day + indices_in_part*(part_number-1) + 1
+        final_timestep = offset_in_days*indices_in_day + indices_in_part*(part_number)
+        @info "Starting part $part_number with indices from" initial_timestep final_timestep
+        flush(stdout)
+        flush(stderr)
+        getapeanalysis(file2d,file3d,outputfile,initial_timestep,final_timestep,part_number,output_timestep,position,Float32)
+
+    end
+
+end
+
+function computebudgets_50days(exp_name;offset_in_days = 0)
+
+    #file2d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_2d.nc"
+    #file3d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_3d.nc"
+    outputfile = string("/global/cscratch1/sd/aramreye/for_postprocessing/ApeBudgetOutputs_50days/",exp_name)
+    input_folder = "/global/cscratch1/sd/aramreye/for_postprocessing/largencfiles/"
+    file2d = string(input_folder,exp_name,"_2d.nc")
+    file3d = string(input_folder,exp_name,"_3d.nc")
+    total_days = 50
+    output_timestep = 7200 #seconds
+    indices_in_part = 60
+    indices_in_day = 86400 ÷ output_timestep
+    number_of_parts = total_days*indices_in_day÷indices_in_part
+
+    for part_number in 1:number_of_parts
+        if part_number == 1
+            position = 1
+        elseif part_number == number_of_parts
+            position = 3
+        else
+            position = 2
+        end
+        initial_timestep = offset_in_days*indices_in_day + indices_in_part*(part_number-1) + 1
+        final_timestep = offset_in_days*indices_in_day + indices_in_part*(part_number)
+        @info "Starting part $part_number with indices from" initial_timestep final_timestep
+        flush(stdout)
+        flush(stderr)
+        getapeanalysis(file2d,file3d,outputfile,initial_timestep,final_timestep,part_number,output_timestep,position,Float32)
+
+    end
+
+end
+
+
+function computebudgets_first30days(exp_name;offset_in_days = 0)
+
+    #file2d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_2d.nc"
+    #file3d = "/global/cscratch1/sd/aramreye/sam3d/subsetsForLin/f5e-4_2km_1000km_control_3d.nc"
+    outputfile = string("/global/cscratch1/sd/aramreye/for_postprocessing/ApeBudgetOutputs_1km/",exp_name)
+    input_folder = "/global/cscratch1/sd/aramreye/for_postprocessing/largencfiles/"
+    file2d = string(input_folder,exp_name,"_2d.nc")
+    file3d = string(input_folder,exp_name,"_3d.nc")
+    total_days = 30
+    output_timestep = 7200 #seconds
+    indices_in_part = 60
+    indices_in_day = 86400 ÷ output_timestep
+    number_of_parts = total_days*indices_in_day÷indices_in_part
+
+    for part_number in 1:number_of_parts
+        if part_number == 1
+            position = 1
+        elseif part_number == number_of_parts
+            position = 3
+        else
+            position = 2
+        end
+        initial_timestep = offset_in_days*indices_in_day + indices_in_part*(part_number-1) + 1
+        final_timestep = offset_in_days*indices_in_day + indices_in_part*(part_number)
+        @info "Starting part $part_number with indices from" initial_timestep final_timestep
+        flush(stdout)
+        flush(stderr)
+        getapeanalysis(file2d,file3d,outputfile,initial_timestep,final_timestep,part_number,output_timestep,position,Float32)
 
     end
 

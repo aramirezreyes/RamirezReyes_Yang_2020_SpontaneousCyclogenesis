@@ -39,8 +39,6 @@ function speedtest2()
 end
 
 
-?variable
-
 @btime speedtest1()
 
 @btime speedtest2()
